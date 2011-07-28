@@ -1,0 +1,744 @@
+/*
+秀丸からコマンドラインを実行する
+
+完璧なコマンドラインではありません。
+「ディレクトリ移動、ファイル削除、ディレクトリ作成、ディレクトリ削除、
+ファイルコピー、情報の表示(dir/tree/ipconfig...etc)」が出来る程度です。
+
+（ファイル）
+cmdline.mac				このマクロ
+cmdline_autorun.mac		自動起動マクロ（おまけマクロ）
+
+
+
+手順
+１：秀丸コンソールマクロを起動
+２：タブのタイトルが「秀丸コンソール」のウインドウがカレントディレクトリに新規作成される
+３：コマンドを入力してマクロ実行
+４：タブのタイトルが「秀丸コンソール」ならマクロを実行
+５：コマンドが、cd foo\bar なら　foo\bar　でopenfileして、現在のウインドウの内容を丸ごとコピー
+	すると、ディレクトリの移動が可能。
+
+
+（出来ないこと）
+	環境変数の設定と変更
+	pushd
+	popd
+
+（できること）
+	dir
+	cd
+	ipconfig
+	cls
+	rd
+	md
+
+（動作）
+(1)本マクロをキーアサインしてください。（例えばF3とか）
+(2)本マクロを起動するとファイル名が <<<<cmdline>>>>.cmdline の空の秀丸エディタが起動します。
+(3)コマンドを入力して(dirとか)、本マクロを実行してください。
+(4)結果が秀丸エディタ内に表示されます。
+
+（）
+拡張子(.cmdline)をファイルタイプ別の設定に登録しておくと個別に画面設定が出来ます。
+例えば「背景を黒色、文字を緑色」といった具合です。
+
+（備考）
+・完璧にするには裏でコマンドラインを非表示で動かしながら、「パイプ・メッセージ..etc」で諸々やりとりするしかないです。
+そこまでやるのは大変なので普段使う範囲のコマンドが動く程度に割り切っています。
+・
+
+
+（todo）
+・複数ウインドウを開けない。wwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+・ディレクトリの存在検査で c:\users\.. の時に正しく検査できない。サポートの返答待ち。
+	-> c:\users\..\*.* で検査すればよいと返答あり。
+・ドライブごとのカレントディレクトリを覚えておく
+	->完成。静的変数を使用しているが玉に瑕。
+・バッチファイルを経由することで、環境変数の変更も追随できるかも。
+・pushd/popd は無理か？
+
+標準入力は使用できない、下記例のように(Y/N)の問い合わせまでは表示されるが入力は出来ない。
+	>del /P hoge.txt
+	>hoge.txt を削除しますか (Y/N)? 
+
+
+*/
+
+/*title "秀丸コンソール";
+title -1;
+endmacro;*/
+
+//openfile "c:\\hoge.txt";
+//endmacro;
+
+
+
+$g_cmdline_filename = "<<<<cmdline>>>>.cmdline";
+
+//テンポラリファイル名
+//環境変数TMPのディレクトリに生成する。
+$g_tmpdir_base_name = "hidemaru_cmdline_tmp_dir";
+$g_tmpfile_base_name = "tmp";
+
+//cmdline_pipe.exe　へのパス
+$g_cmdline_pipe_path = "\"" + currentmacrodirectory + "\\" + "cmdline_pipe.exe" + "\"";
+$g_drive_dir[0] 	= "";
+$g_staticvar_prefix	= "cmdline_";
+#g_share_flag = 1;
+
+$DENGAKU_DLL = hidemarudir + "\\DengakuDLL.dll";
+$g_cmd="";
+$g_arg="";
+#g_load_dengaku = false;
+call Main;
+clearupdated;
+if(#g_load_dengaku){
+	freedll;
+}
+endmacro;
+
+Main:
+	if(basename != $g_cmdline_filename){
+		call OpenNewCmdline;
+		return true;
+	}
+
+	call LoadDengaku;
+	if(! ##return){
+		return false;
+	}
+		
+	call TryDriveChange;
+	if(##return){
+		return true;
+	}
+	
+	call TryOpenByShell;
+	if(##return){
+		return true;
+	}
+		
+	escape;
+	call ParseCmd;
+	if(! ##return){
+		return false;
+	}
+	
+	##insert_enter	= true;
+	##old_lineno 	= lineno;
+	$$cmd_low 		= tolower($g_cmd);
+	if(0 == strlen($g_arg)){
+		/*
+		dir/cd/tree のような引数なしのコマンド
+		*/
+		if($$cmd_low == "cls"){
+			call Cmd_CLS;
+			##insert_enter=false;
+		}else if($$cmd_low == "exit"){
+			call Cmd_EXIT;
+			##insert_enter=false;
+		}else{
+			call RunCmd $g_cmd;
+		}
+	}else{
+		call IsHelp $g_arg;
+		if(##return){
+			//コマンド /? の形式
+			call RunCmd $g_cmd + " " + $g_arg;
+		}else{
+			if($$cmd_low == "cd"){
+				//秀丸の実行環境を変更する
+				//個別対応するしかない
+				call Cmd_CD;
+			}else{
+				call RunCmd $g_cmd + " " + $g_arg;
+			}
+		}
+	}
+	
+	if(##insert_enter){
+		if(##old_lineno == lineno){
+			//コマンドラインが何も返さないときの対策。
+			//改行だけ入れておく。
+			golineend2;
+			insert("\n");
+		}
+	}
+	
+	return true;
+
+RunCmd:
+	$$cmd = $$1;
+	golineend2;
+	insert("\n");
+	$$old_wd = dllfuncstr("GETCURDIR");
+	call Run $$cmd;
+	$$cur_wd 	= dllfuncstr("GETCURDIR");
+	return;
+
+Run:
+	$$cmd = $$1;
+	if(0){
+		run("cmd /C" + $$cmd + ">con");
+	}else{
+		$$arg = "\"cmd.exe /C" + $$cmd + "\"";
+		runex $g_cmdline_pipe_path + " " + $$arg, 1,
+			0, "",
+			5, "",
+			1, "",
+			0, "",
+			2, 1, 0;
+	}
+	return ;
+	
+/*
+一行が以下の時に、
+	cd hoo\bar
+
+g_cmd="cd"
+g_arg="hoo\bar"
+と分割する。
+*/
+ParseCmd:
+	golinetop2;
+
+	//先頭に空白行があれば読み飛ばす
+	call SkipSpace;
+
+	//コマンド部を読み飛ばす
+	##old_column = column;
+	while(1){
+		call IsWhiteSpace;
+		if(##return){
+			break;
+		}
+		right;
+		if(! result){
+			break;
+		}
+	}
+	
+	//コマンド部を取り出す
+	$g_cmd = gettext2(##old_column,lineno,column,lineno);
+	if(! strlen($g_cmd)){
+		return false;
+	}
+	
+	//空白行を読み飛ばす
+	call SkipSpace;
+
+	##old_column = column;
+	golineend2;
+	$g_arg = gettext2(##old_column,lineno,column,lineno);
+	//message("$g_arg="+$g_arg);
+	return true;
+
+
+
+LoadDengaku:
+	loaddll $DENGAKU_DLL;
+	if (!result) {
+		message "田楽DLLのロードに失敗しました\n" + "DengakuDLL.dllが秀丸のディレクトリに存在するか確認してください";
+		return false;
+	}
+	#g_load_dengaku = true;
+	return true;
+
+IsHelp:
+	$$s = $$1;
+	##len = strlen($$s);
+	##pos = strstr($$s,"/");
+	if(0<=##pos){
+		//"/"の前が空白かどうか
+		##i = 0;
+		while(##i < ##pos){
+			$$c = midstr($$s,##i, 1);
+			if(($$c!=" ") && ($$c!="\t")){
+				return false;
+			}
+			##i = ##i + 1;
+		}
+
+		$$s = rightstr($$s, (##len - ##pos) - 1);
+		##pos = strstr($$s,"?");
+		if(0<=##pos){
+			//"?"の前が空白かどうか
+			##i = 0;
+			while(##i < ##pos){
+				$$c = midstr($$s,##i, 1);
+				if(($$c!=" ") && ($$c!="\t")){
+					return false;
+				}
+				##i = ##i + 1;
+			}
+			return true;
+		}
+	}
+	return false;
+
+//シェルで開けるかどうか試す
+TryOpenByShell:
+	##old_column = column;
+	##old_lineno = lineno;
+	disabledraw;
+	selectline;
+	
+	disableerrormsg;
+	openbyshell;
+	##r = result;
+	enableerrormsg;
+	
+	if(##r){
+		golineend2;
+		insert("\n");
+		clearupdated;
+	}else{
+		movetolineno ##old_column+1,##old_lineno;
+	}
+	escape;
+	enabledraw;
+	return ##r;
+
+/*ドライブの変更
+	c:
+	d:
+*/
+TryDriveChange:
+	##old_column = column;
+	##old_lineno = lineno;
+	disabledraw;
+	selectline;
+	$$cmd = gettext2(seltopcolumn,seltoplineno,selendcolumn,selendlineno);
+	movetolineno ##old_column+1,##old_lineno;
+	escape;
+	enabledraw;
+	$$cmd = dllfuncstr("RTRIM",$$cmd);
+	$$cmd = dllfuncstr("LTRIM",$$cmd);
+	call IsDrive $$cmd;
+	if(##return){
+		call GetPrevDir leftstr($$cmd,1);
+		$$prev_path = $$return;
+		if(strlen($$prev_path)){
+			//前回のディレクトリへ強制移動する。
+			$$cmd = "cd /d " + $$prev_path + "\n" +
+					$$cmd;
+		}
+		call RunUnderConsole $$cmd;
+		$$dir = $$return;
+		if(! strlen($$dir)){
+			return false;
+		}
+		call ChangeCWD $$dir;
+		insert("\n");
+		//入力はドライブ文字(c: d: ...etc)なので、移動したことにしておく
+		return true;
+	}
+	return false;
+	
+Cmd_CLS:
+	disabledraw;
+	selectall;
+	backspace;
+	enabledraw;
+	return true;
+
+Cmd_EXIT:
+	//自分自身を終了させる手立てがない・・・
+	insert("\n（秀丸コンソール）exitは未対応です。\n");
+	return true;
+
+//cd コマンド
+Cmd_CD:
+	/*
+	相対パス指定に備えて、/d オプションで絶対パスへ移動する
+	*/
+	$$cmd = "cd /d " + directory + "\n" +
+			"cd " + $g_arg;
+	call RunUnderConsole $$cmd;
+	$$dir = $$return;
+	if(! strlen($$dir)){
+		return false;
+	}
+	call ChangeCWD $$dir;
+	return ##return;
+	
+
+RunUnderConsole:
+	$$cmd = $$1;
+	call GetTempFile;
+	$$tmpfile = $$return;
+	if(0==strlen($$tmpfile)){
+		return "";
+	}
+	$$tmpfile = $$tmpfile + ".bat";
+	##cur_hidemaru = hidemaruhandle(0);
+	
+	//ユーザー指定コマンドの後に、カレントディレクトリを表示する
+	$$cmd = "@echo off\n"	+
+			$$cmd + "\n"	+
+			"cd";
+	
+	//非表示の秀丸でコンソール起動する
+	openfile "/h";
+	//newfile;
+	
+	##old_hidemaru = hidemaruhandle(0);
+	insert($$cmd);
+	saveas $$tmpfile;
+	if(! result){
+		deletefile $$tmpfile;
+		return "";
+	}
+	
+	insert("\n---- ここからコマンドラインの結果 ----\n");
+	call Run $$tmpfile;
+	deletefile $$tmpfile;
+	call GetLastCmdline;
+	$$last_line = $$return;
+	if(! strlen($$last_line)){
+		return "";
+	}
+	
+	setactivehidemaru ##cur_hidemaru;
+	closehidemaruforced ##old_hidemaru;
+
+	if(! strlen($$last_line)){
+		return "";
+	}
+	//改行が付いているときがあるので削除する
+	$$last_line = dllfuncstr("RTRIM",$$last_line);
+	
+	call GetTmpBaseDirName;
+	$$tmpdir = $$return;
+	if(tolower($$last_line) == tolower($$tmpdir)){
+		//存在しないドライブへ移動した場合（パッチ）
+		return "";
+	}
+	
+	//このあたりで
+	//新しいカレントディレクトリを返す
+	return $$last_line;
+	
+		
+/*	最終行から空白ではない一行を取り出す
+*/
+GetLastCmdline:
+	##i = 0;	//無限ループ防止
+	gofileend;
+	while(##i < 1000){
+		if(linelen2){
+			selectline;
+			return gettext2(seltopcolumn,seltoplineno,selendcolumn,selendlineno);
+		}
+		
+		up;
+		if(!result){
+			return "";
+		}
+		##i = ##i + 1;
+	}
+	return "";
+	
+Cmd_CD_old:
+	$$s = dllfuncstr("RTRIM",$g_arg);
+	if(1==strlen($$s)){
+		if(leftstr($g_arg,1) == "/"){
+			/*	これを
+					cd /
+
+				こう変形する
+					cd \
+
+				/のままだと、うまく動かない。
+			*/
+			$g_arg = "\\";
+		}
+	}
+	
+	$$abs_path = $g_arg;
+	
+	/*
+		cd /
+		cd \
+	*/
+	call IsRootDir $g_arg;
+	if(##return){
+		//pass
+	}else{
+		/*
+			cd \\server01
+		*/
+		call IsUNCDir $g_arg;
+		if(##return){
+			insert("\nCMD では UNC パスは現在のディレクトリとしてサポートされません。\n");
+			return true;
+		}else{
+			/*
+				c:
+			*/
+			call IsDrive $g_arg;
+			if(##return){
+				$$abs_path = $$abs_path + "\\";
+			}else{
+				/*
+					cd c:\windows
+				*/
+				call IsAbsDir $g_arg;
+				if(##return){
+					//絶対パス指定
+				}else{
+					/*相対パス指定
+						cd .
+						cd ..
+						cd subdir
+					*/
+					$$abs_path = dllfuncstr("GETCURDIR") + "\\" + $g_arg + "\\";
+if(0){					
+//サポート掲示板の返答待ち
+					if(! existfile($$abs_path,0x00000010)){
+						insert("\n指定されたパスが見つかりません。\n");
+						return true;
+					}
+}					
+				}
+			}
+		}
+	}
+	
+	/*
+	ドライブの存在検査はdengakuに任せるより、自前で確実に検査しておく。
+	*/
+	call IsAbsDir $$abs_path;
+	if(##return){
+		call CheckExistDir $$abs_path;
+		if(! ##return){
+			insert("\n指定されたドライブが見つかりません。\n");
+			return true;
+		}
+	}
+	
+	$$old_wd 	= dllfuncstr("GETCURDIR");
+	##n 		= dllfunc("SETCURDIR", $$abs_path);
+	$$cur_wd 	= dllfuncstr("GETCURDIR");
+	if($$old_wd != $$cur_wd){
+		call ChangeCWDMain $$cur_wd;
+		if(! ##return){
+			return false;
+		}
+	}
+	return true;
+
+ChangeCWD:
+	//ディレクトリ区切りが異なるかもしれないので、設定してから取得し比較する。
+	$$dir 		= $$1;
+	$$old_wd 	= dllfuncstr("GETCURDIR");
+	##n 		= dllfunc("SETCURDIR", $$dir);
+	$$cur_wd 	= dllfuncstr("GETCURDIR");
+	if($$old_wd != $$cur_wd){
+		//異なればディレクトリ移動する
+		call ChangeCWDMain $$cur_wd;
+		if(! ##return){
+			return false;
+		}
+		call SetPrevDir $$cur_wd;
+	}
+	return true;
+	
+ChangeCWDMain:
+	/*ディレクトリの移動
+	*/
+	$$cwd = $$1;
+
+	call GetTempFile;
+	$$tmpfile = $$return;
+	if(0==strlen($$tmpfile)){
+		return false;
+	}
+	runex "cmd /Ccopy nul " + $$tmpfile, 1,
+		0, "",
+		0, "",
+		0, "",
+		0, "",
+		2, 0, 0;
+	if(! result){
+		return false;
+	}
+
+	appendsave $$tmpfile,noaddhist;
+	if(! result){
+		return false;
+	}
+	##cur_hidemaru = hidemaruhandle(0);
+	openfile $$cwd + "\\" + $g_cmdline_filename;
+	if(! result){
+		return false;
+	}
+
+	insertfile $$tmpfile;
+	if(! result){
+		return false;
+	}
+	
+	closehidemaruforced ##cur_hidemaru;
+	
+	deletefile $$tmpfile;
+	return true;
+
+GetTmpBaseDirName:
+	$$tempdir = getenv("tmp");
+	if( leftstr( $$tempdir, 1 ) != "\\" ) {
+		$$tempdir = $$tempdir + "\\";
+	}
+	return $$tempdir + $g_tmpdir_base_name ;
+	
+//テンポラリファイル作成サブルーチン
+GetTempFile:
+	call GetTmpBaseDirName;
+	$$tmpdir = $$return;
+	##n = dllfunc("MKDIR",$$tmpdir);
+	if(! ##n){
+		message "テンポラリディレクトリが作成できません\n" + $$tmpdir;
+		return false;
+	}
+	
+	##n		= tickcount;
+	##end 	= ##n + 1000;
+	while(##n<##end){
+	 	$$tempfile = $$tmpdir + "\\" + $g_tmpfile_base_name + str(##n);
+	 	if( !existfile( $$tempfile ) ) {
+			return $$tempfile;
+		}
+	 	##n = ##n + 1;
+	}
+	message "テンポラリファイルが作成できません\n" + $$tempfile;
+	return "";
+
+SkipSpace:
+	while(1){
+		call IsSpace;
+		if(! ##return){
+			break;
+		}
+		right;
+		if(! result){
+			return true;
+		}
+	}
+	return true;
+
+
+IsSpace:
+	return (unicode<=0x20);
+
+
+IsWhiteSpace:
+	/*
+		0x47 	/
+		0x5c	\
+		0x2e	.
+	*/
+	return (unicode<=0x20) || (unicode==0x47) || (unicode==0x5c) || (unicode==0x2e);
+
+IsUNCDir:
+	$$s = $$1;
+	if(2<=strlen($$s)){
+		return "\\\\" == midstr($$s,0,2);
+	}
+	return false;
+
+IsAbsDir:
+	$$s = $$1;
+	if(3<=strlen($$s)){
+		return ":" == midstr($$s,1,1);
+	}
+	return false;
+
+IsRootDir:
+	$$s = $$1;
+	if(1==strlen($$s)){
+		return ("/"==$$s) || ("\\"==$$s);
+	}
+	return false;
+
+IsDrive:
+	$$s = $$1;
+	if(2==strlen($$s)){
+		return ":" == midstr($$s,1,1);
+	}
+	return false;
+
+CheckExistDir:
+	$$s = $$1;
+	$$drive = tolower(midstr($$s,0,1));
+	$$exist_drive = dllfuncstr("GETDRIVES");
+	##index = ascii($$drive) - 'a';
+	return "1" == midstr($$exist_drive, ##index, 1);
+
+GetDriveCurDir:
+	$$path = $$1;
+	if(strlen($$path)<2){
+		return "";
+	}
+	//"a:" "b:" ...
+	$$drive = leftstr($$path,2);
+	if(":" != rightstr($$drive,1)){
+		return "";
+	}
+	
+OpenNewCmdline:
+	openfile $g_cmdline_filename;
+	call LoadDengaku;
+	if(! ##return){
+		return false;
+	}	
+	$$cur_wd = dllfuncstr("GETCURDIR");
+	call SetPrevDir $$cur_wd;
+	
+	/*##i = 'a';
+	while(##i <= 'z'){
+		$$drive = str(##i);
+		call MakeDirveToVariable;
+		$$drive = $$return;
+		setstaticvariable $$drive, "", #g_share_flag;
+		##i = ##i + 1;
+	}*/
+	return true;
+
+
+/*
+引数:"a",b"とか
+*/
+MakeDirveToVariable:
+	$$drive = $$1;
+	return $g_staticvar_prefix + tolower($$drive);
+
+/* ドライブごとのディレクトリを返す。
+"a" -> "a:\hoge\foo";
+"c" -> "c:\program files\hoge";
+*/
+GetPrevDir:
+	$$drive = $$1;
+	if(1 != strlen($$drive)){
+		message("err:GetPrevDir");
+		endmacro;
+	}
+	call MakeDirveToVariable $$drive;
+	$$drive = $$return;
+	return getstaticvariable($$drive, #g_share_flag);
+
+/*ドライブごとのディレクトリを設定する。
+引数 - 絶対パス
+*/
+SetPrevDir:
+	$$abs_path = $$1;
+	if(strlen($$abs_path) < 3){
+		message("err:SetPrevDir");
+		endmacro;
+	}
+	$$drive = leftstr($$abs_path, 1);
+	call MakeDirveToVariable $$drive;
+	$$drive = $$return;
+	setstaticvariable $$drive, $$abs_path, #g_share_flag;
+	return true;
+	

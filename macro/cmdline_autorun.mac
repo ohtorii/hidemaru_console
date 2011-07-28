@@ -1,0 +1,21 @@
+/*
+「秀丸からコマンドラインを実行するマクロ」の自動起動マクロ
+
+改行を入力する度にコマンドラインのマクロを起動します。
+
+（登録方法）
+「マクロ登録 -> 自動起動 -> 編集後タイマー」に本マクロを登録する。
+遅延時間は0msを選択してください。
+*/
+
+if(basename != "<<<<cmdline>>>>.cmdline"){
+	endmacro;
+}
+
+if(event(5) && (geteventparam(1))){
+	//編集後タイマー、かつ、改行
+	disabledraw;
+	undo;
+	execmacro "cmdline.mac";
+	enabledraw;
+}
